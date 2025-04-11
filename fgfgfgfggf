@@ -1,0 +1,1012 @@
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local RunService = game:GetService("RunService")
+--VEHICLE SYSTEM
+
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local VEHICLE_ROOT = workspace.SpawnedVehicles
+
+-- Конфигурация для конкретной игры
+local SEAT_CONFIG = {
+    Driver = {
+        Path = {"Hull", "Driver"},
+        EventName = "SeatEvt",
+        SeatID = 1
+    },
+    Gunner = {
+        Path = {"Turret1", "Turret", "Gunner"},
+        EventName = "SeatEvt",
+        SeatID = 2
+    }
+}
+
+-- Поиск компонентов по пути
+local function findSeat(targetType, vehicle)
+    local current = vehicle
+    for _, part in ipairs(SEAT_CONFIG[targetType].Path) do
+        current = current:FindFirstChild(part)
+        if not current then return nil end
+    end
+    return current
+end
+
+-- Плавное переключение без высадки
+local function switchSeat(targetType)
+    local character = LocalPlayer.Character
+    if not character then return false end
+    
+    local humanoid = character:FindFirstChild("Humanoid")
+    if not humanoid then return false end
+
+    local closestEvent, closestSeat, minDistance = nil, nil, math.huge
+    local rootPos = character.HumanoidRootPart.Position
+
+    -- Поиск ближайшего места
+    for _, vehicle in ipairs(VEHICLE_ROOT:GetChildren()) do
+        local seat = findSeat(targetType, vehicle)
+        if seat then
+            local event = seat:FindFirstChild(SEAT_CONFIG[targetType].EventName)
+            if event and event:IsA("RemoteEvent") then
+                local distance = (rootPos - seat.Position).Magnitude
+                if distance < minDistance and distance <= 25 then
+                    closestEvent = event
+                    closestSeat = seat
+                    minDistance = distance
+                end
+            end
+        end
+    end
+
+    -- Переключение через асинхронный вызов
+    if closestEvent and closestSeat then
+        task.spawn(function()
+            -- Отправка специального флага серверу
+            closestEvent:FireServer(LocalPlayer, SEAT_CONFIG[targetType].SeatID, "silent_switch")
+            
+            -- Плавная анимация перехода
+            local currentSeat = humanoid.SeatPart
+            if currentSeat then
+                currentSeat:SetAttribute("DisableExit", true)
+            end
+            
+            task.wait(0.1)
+            humanoid.Sit = true
+            closestSeat.Occupant = humanoid
+        end)
+        return true
+    end
+    return false
+end
+
+-- Определение текущего места
+local function getCurrentSeatType()
+    local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid")
+    if not humanoid or not humanoid.Sit then return nil end
+
+    local seat = humanoid.SeatPart
+    if not seat then return nil end
+
+    for seatType, config in pairs(SEAT_CONFIG) do
+        if seat:IsDescendantOf(VEHICLE_ROOT) and seat.Name == config.Path[#config.Path] then
+            return seatType
+        end
+    end
+    return nil
+end
+
+
+-- AIM BOT SYSTEM
+local AimBot = {
+    Enabled = false,
+    Activated = false,
+    TargetPart = "Head",
+    FOV = 100,
+    Smoothness = 30,
+    TeamCheck = true,
+    ShowFOV = true,
+    TargetLocked = false
+}
+
+local UserInputService = game:GetService("UserInputService")
+local Camera = workspace.CurrentCamera
+
+local FOVGui = Instance.new("ScreenGui")
+FOVGui.Name = "FOVGui"
+FOVGui.Parent = game.CoreGui
+FOVGui.ResetOnSpawn = false
+
+local FOVCircle = Instance.new("Frame")
+FOVCircle.Name = "FOVCircle"
+FOVCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+FOVCircle.BackgroundTransparency = 1
+FOVCircle.BorderSizePixel = 0
+FOVCircle.ZIndex = 10
+FOVCircle.Size = UDim2.new(0, AimBot.FOV, 0, AimBot.FOV)
+FOVCircle.Visible = false
+FOVCircle.Parent = FOVGui
+
+local UIStroke = Instance.new("UIStroke")
+UIStroke.Color = Color3.new(1, 0, 0)
+UIStroke.Thickness = 3
+UIStroke.Transparency = 0
+UIStroke.LineJoinMode = Enum.LineJoinMode.Round
+UIStroke.Parent = FOVCircle
+
+local UICorner = Instance.new("UICorner")
+UICorner.CornerRadius = UDim.new(1, 0.2)
+UICorner.Parent = FOVCircle
+
+local function updateFOVCircle()
+    FOVCircle.Visible = AimBot.Enabled and AimBot.ShowFOV
+    if not AimBot.Enabled then return end
+    
+    local mousePos = UserInputService:GetMouseLocation()
+    FOVCircle.Position = UDim2.new(0, mousePos.X, 0, mousePos.Y - 50)
+    FOVCircle.Size = UDim2.new(0, AimBot.FOV, 0, AimBot.FOV)
+    UIStroke.Color = AimBot.TargetLocked and Color3.new(0, 1, 0) or Color3.new(1, 0, 0)
+end
+
+local function isPlayerVisible(player)
+    local character = player.Character
+    if not character then return false end
+    
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local rootPart = character:FindFirstChild("HumanoidRootPart")
+    if not humanoid or humanoid.Health <= 0 or not rootPart then return false end
+    
+    local cameraDirection = Camera.CFrame.LookVector
+    local playerDirection = (rootPart.Position - Camera.CFrame.Position).Unit
+    return cameraDirection:Dot(playerDirection) > 0
+end
+
+local function getClosestPlayer()
+    if not AimBot.Enabled then return nil end
+    
+    local closestPlayer = nil
+    local closestDistance = AimBot.FOV
+    local mousePos = UserInputService:GetMouseLocation()
+    
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            if AimBot.TeamCheck and player.Team == LocalPlayer.Team then continue end
+            if not isPlayerVisible(player) then continue end
+            
+            local targetPart = player.Character:FindFirstChild(AimBot.TargetPart)
+            if not targetPart then continue end
+            
+            local screenPoint = Camera:WorldToViewportPoint(targetPart.Position)
+            local distance = (Vector2.new(mousePos.X, mousePos.Y) - Vector2.new(screenPoint.X, screenPoint.Y)).magnitude
+            
+            if distance < closestDistance and screenPoint.Z > 0 then
+                closestPlayer = player
+                closestDistance = distance
+            end
+        end
+    end
+    
+    AimBot.TargetLocked = closestPlayer ~= nil
+    return closestPlayer
+end
+
+local function aimAt(targetPart)
+    if not targetPart or not AimBot.Enabled then return end
+    local cameraPos = Camera.CFrame.Position
+    local targetPos = targetPart.Position
+    
+    local delta = (targetPos - cameraPos).Unit
+    local newCF = CFrame.new(cameraPos, cameraPos + delta)
+    Camera.CFrame = Camera.CFrame:Lerp(newCF, 1/AimBot.Smoothness)
+end
+
+UserInputService.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton2 and AimBot.Enabled then
+        AimBot.Activated = true
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then
+        AimBot.Activated = false
+        AimBot.TargetLocked = false
+    end
+end)
+
+RunService.RenderStepped:Connect(function()
+    updateFOVCircle()
+    
+    if AimBot.Enabled and AimBot.Activated then
+        local closestPlayer = getClosestPlayer()
+        if closestPlayer and closestPlayer.Character then
+            local targetPart = closestPlayer.Character:FindFirstChild(AimBot.TargetPart)
+            if targetPart then
+                aimAt(targetPart)
+            end
+        end
+    else
+        AimBot.TargetLocked = false
+    end
+end)
+
+-- METERS SYSTEM
+local Meters = {
+    Enabled = false,
+    Connections = {},
+    labelCache = {},
+    TEXT_COLOR = Color3.new(1, 1, 1),
+    TEXT_SIZE = 24,
+    STUD_TO_METER = 0.36,
+    UPDATE_INTERVAL = 0.1
+}
+
+local function findBodyPart(character, partNames)
+    for _, name in ipairs(partNames) do
+        local part = character:FindFirstChild(name)
+        if part then return part end
+    end
+    return nil
+end
+
+local function createLabel(targetHead)
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "DistanceLabelPro"
+    billboard.Size = UDim2.new(6, 0, 2, 0)
+    billboard.AlwaysOnTop = true
+    billboard.MaxDistance = 99999
+    billboard.ExtentsOffset = Vector3.new(0, 4.5, 0)
+    billboard.ResetOnSpawn = false
+
+    local textLabel = Instance.new("TextLabel")
+    textLabel.Size = UDim2.new(1, 0, 1, 0)
+    textLabel.BackgroundTransparency = 1
+    textLabel.TextColor3 = Meters.TEXT_COLOR
+    textLabel.TextSize = Meters.TEXT_SIZE
+    textLabel.Font = Enum.Font.SourceSansBold
+    textLabel.TextStrokeColor3 = Color3.new(0,0,0)
+    textLabel.TextStrokeTransparency = 0.2
+    textLabel.Text = "0м"
+
+    textLabel.Parent = billboard
+    billboard.Parent = targetHead
+    return billboard
+end
+
+local function destroyLabel(player)
+    if Meters.labelCache[player] then
+        Meters.labelCache[player]:Destroy()
+        Meters.labelCache[player] = nil
+    end
+end
+
+local function onPlayerRemoving(player)
+    destroyLabel(player)
+end
+
+local function onCharacterAdded(player, character)
+    destroyLabel(player)
+end
+
+local function updateLabels()
+    if not Meters.Enabled then return end
+    
+    local localPlayer = Players.LocalPlayer
+    if not localPlayer or not localPlayer.Character then return end
+
+    local rootParts = {"HumanoidRootPart", "UpperTorso", "Torso"}
+    local localRoot = findBodyPart(localPlayer.Character, rootParts)
+    if not localRoot then return end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == localPlayer then continue end
+        
+        if not player.Character then
+            destroyLabel(player)
+            continue
+        end
+
+        local targetRoot = findBodyPart(player.Character, rootParts)
+        local targetHead = findBodyPart(player.Character, {"Head"})
+        if not targetRoot or not targetHead then
+            destroyLabel(player)
+            continue
+        end
+
+        if not Meters.labelCache[player] then
+            Meters.labelCache[player] = createLabel(targetHead)
+        end
+
+        if Meters.labelCache[player].Parent ~= targetHead then
+            Meters.labelCache[player].Parent = targetHead
+        end
+
+        local distance = math.floor((localRoot.Position - targetRoot.Position).Magnitude * Meters.STUD_TO_METER)
+        Meters.labelCache[player].TextLabel.Text = string.format("%dм", distance)
+    end
+end
+
+local function enableMeters()
+    table.insert(Meters.Connections, Players.PlayerRemoving:Connect(onPlayerRemoving))
+    for _, player in ipairs(Players:GetPlayers()) do
+        table.insert(Meters.Connections, player.CharacterAdded:Connect(function(character)
+            onCharacterAdded(player, character)
+        end))
+    end
+
+    Meters.Enabled = true
+    coroutine.wrap(function()
+        while Meters.Enabled do
+            local success, err = pcall(updateLabels)
+            if not success then
+                warn("Meters error: "..tostring(err))
+            end
+            task.wait(Meters.UPDATE_INTERVAL)
+        end
+    end)()
+end
+
+local function disableMeters()
+    Meters.Enabled = false
+    for _, conn in ipairs(Meters.Connections) do
+        conn:Disconnect()
+    end
+    Meters.Connections = {}
+
+    for player, label in pairs(Meters.labelCache) do
+        label:Destroy()
+    end
+    Meters.labelCache = {}
+end
+
+-- WEAPON MODIFICATION SYSTEM
+local WeaponMods = {
+    CycleApply = false,
+    InfAmmo = false,
+    NoRecoil = false,
+    FastFire = false,
+    Bullets = 50,
+    MinSpread = 0,
+    MaxSpread = 0,
+    ChangeFireMode = false
+}
+
+local function applyWeaponModifications()
+    local LPB = LocalPlayer.Backpack
+    for _, v in pairs(LPB:GetChildren()) do
+        if v:FindFirstChild("ACS_Settings") then
+            local m = require(v.ACS_Settings)
+            
+            m.AmmoInGun = WeaponMods.InfAmmo and math.huge or m.AmmoInGun
+            m.ShootRate = WeaponMods.FastFire and 1e16 or m.ShootRate
+            m.Bullets = WeaponMods.Bullets
+            m.MinSpread = 0
+            m.MaxSpread = WeaponMods.MaxSpread
+            
+            m.FireModes = {
+                ChangeFiremode = WeaponMods.ChangeFireMode,
+                Semi = false,
+                Burst = false,
+                Auto = true
+            }
+
+            if WeaponMods.NoRecoil then
+                m.MinRecoilPower = 0
+                m.MaxRecoilPower = 0
+                m.GunRecoin = 0
+                m.RecoilPowerStepAmount = 0
+                
+                m.camRecoil = {
+                    camRecoilUp = {0, 1},
+                    camRecoilTilt = {0, 1},
+                    camRecoilLeft = {0, 1},
+                    camRecoilRight = {0, 1}
+                }
+                
+                m.gunRecoil = {
+                    gunRecoilUp = {0, 1},
+                    gunRecoilTilt = {0, 1},
+                    gunRecoilLeft = {0, 1},
+                    gunRecoilRight = {0, 1}
+                }
+            end
+        end
+    end
+end
+
+-- FAST PLACE SYSTEM
+local FastPlace = {
+    Enabled = false,
+    Connection = nil
+}
+
+local function setupFastPlace()
+    local mouse = LocalPlayer:GetMouse()
+    local BuildingFolder = workspace:WaitForChild("BuildingCloneFolder")
+
+    local function getPhantomDirection(toolName)
+        local phantom = BuildingFolder:FindFirstChild(toolName)
+        return phantom and (phantom:GetPivot().LookVector * Vector3.new(1,0,1)).Unit or Vector3.new(0,0,1)
+    end
+
+    return mouse.Button1Down:Connect(function()
+        local character = LocalPlayer.Character
+        if not character then return end
+
+        local tool = character:FindFirstChildOfClass("Tool")
+        if not tool then return end
+
+        local basePos = mouse.Hit.Position
+        local placementPos = basePos
+        local direction = getPhantomDirection(tool.Name)
+        local placementCFrame = CFrame.new(placementPos, placementPos + direction)
+
+        if tool.Name == "Mine" then
+            placementCFrame = placementCFrame + Vector3.new(0, -0.26, 0)
+            placementPos = basePos + Vector3.new(0, -0.26, 0)
+        else
+            placementCFrame = placementCFrame + Vector3.new(0, 0.5, 0)
+            placementPos = basePos + Vector3.new(0, 0.5, 0)
+        end
+
+        game.ReplicatedStorage.Events.PlacementEvent:FireServer(
+            tool.Name,
+            placementCFrame,
+            workspace.Terrain,
+            placementPos
+        )
+    end)
+end
+
+-- DRONE ESP SYSTEM
+local DroneESP = {
+    Enabled = false,
+    AlertEnabled = false,
+    AlertDistance = 1000,
+    Connections = {},
+    ActiveDrones = {},
+    AlertedDrones = {}
+}
+
+local function SendDroneAlert()
+    Rayfield:Notify({
+        Title = "DRONE ALERT",
+        Content = "Enemy drone detected within "..DroneESP.AlertDistance.." studs!",
+        Duration = 5,
+        Image = 4483362458
+    })
+end
+
+local function UpdateDroneColor(droneObject, player)
+    if not droneObject:FindFirstChild("DroneESP") then return end
+    
+    local teamColor = if player and player.Team then player.Team.TeamColor.Color else Color3.new(1, 1, 1)
+    
+    droneObject.DroneESP.Frame.BackgroundColor3 = teamColor
+    if droneObject:FindFirstChild("ESPHighlight") then
+        droneObject.ESPHighlight.FillColor = teamColor
+    end
+end
+
+local function CheckDroneDistance()
+    if not DroneESP.AlertEnabled or not LocalPlayer.Character then return end
+    
+    local humanoidRootPart = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not humanoidRootPart then return end
+
+    for droneModel, ownerName in pairs(DroneESP.ActiveDrones) do
+        local drone = droneModel:FindFirstChild("Drone")
+        if drone and drone:IsDescendantOf(workspace) then
+            local ownerPlayer = Players:FindFirstChild(ownerName)
+            local isFriendly = ownerPlayer and ownerPlayer.Team == LocalPlayer.Team
+            
+            if isFriendly then continue end
+
+            -- Fixed position check with proper validation
+            local dronePosition
+            if drone:IsA("BasePart") then
+                dronePosition = drone.Position
+            elseif drone:IsA("Model") and drone.PrimaryPart then
+                dronePosition = drone.PrimaryPart.Position
+            else
+                continue
+            end
+
+            local distance = (humanoidRootPart.Position - dronePosition).Magnitude
+            if distance <= DroneESP.AlertDistance then
+                if not DroneESP.AlertedDrones[droneModel] then
+                    SendDroneAlert()
+                    DroneESP.AlertedDrones[droneModel] = true
+                end
+            else
+                DroneESP.AlertedDrones[droneModel] = nil
+            end
+        else
+            DroneESP.ActiveDrones[droneModel] = nil
+            DroneESP.AlertedDrones[droneModel] = nil
+        end
+    end
+end
+
+local function SetupDroneESP(mainDrone)
+    local drone = mainDrone:WaitForChild("Drone", 5)
+    local ownerTag = mainDrone:WaitForChild("OwnershipTag", 5)
+    if not drone or not ownerTag then return end
+
+    DroneESP.ActiveDrones[mainDrone] = ownerTag.Value
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "DroneESP"
+    billboard.Adornee = drone
+    billboard.Size = UDim2.new(5, 0, 5, 0)
+    billboard.AlwaysOnTop = true
+    billboard.ExtentsOffset = Vector3.new(0, 5, 0)
+    billboard.MaxDistance = 10000
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(1, 0, 1, 0)
+    frame.BackgroundTransparency = 0.2
+    frame.BorderSizePixel = 0
+    frame.Parent = billboard
+
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "ESPHighlight"
+    highlight.FillTransparency = 0.4
+    highlight.OutlineTransparency = 0
+    highlight.Parent = drone
+
+    local function UpdateOwner()
+        local username = ownerTag.Value
+        DroneESP.ActiveDrones[mainDrone] = username
+        
+        local player = Players:FindFirstChild(username)
+        if not player and username ~= "" then
+            Players.PlayerAdded:Connect(function(newPlayer)
+                if newPlayer.Name == username then
+                    UpdateDroneColor(drone, newPlayer)
+                    newPlayer:GetPropertyChangedSignal("Team"):Connect(function()
+                        UpdateDroneColor(drone, newPlayer)
+                    end)
+                end
+            end)
+        end
+
+        if player then
+            UpdateDroneColor(drone, player)
+            player:GetPropertyChangedSignal("Team"):Connect(function()
+                UpdateDroneColor(drone, player)
+            end)
+        end
+    end
+
+    ownerTag.Changed:Connect(UpdateOwner)
+    billboard.Parent = drone
+    UpdateOwner()
+end
+
+local function InitializeDrones()
+    local buildings = workspace:WaitForChild("PlacedBuildings", 5)
+    if not buildings then return end
+    
+    for _, name in {"Drone", "FPVDrone"} do
+        for _, drone in ipairs(buildings:GetChildren()) do
+            if drone.Name == name then
+                SetupDroneESP(drone)
+            end
+        end
+    end
+
+    table.insert(DroneESP.Connections, buildings.ChildAdded:Connect(function(child)
+        if child.Name == "Drone" or child.Name == "FPVDrone" then
+            SetupDroneESP(child)
+        end
+    end))
+end
+
+local function EnableDroneESP()
+    InitializeDrones()
+    table.insert(DroneESP.Connections, RunService.RenderStepped:Connect(CheckDroneDistance))
+end
+
+local function DisableDroneESP()
+    for _, conn in ipairs(DroneESP.Connections) do
+        conn:Disconnect()
+    end
+    DroneESP.Connections = {}
+    DroneESP.ActiveDrones = {}
+    DroneESP.AlertedDrones = {}
+
+    for droneModel, _ in pairs(DroneESP.ActiveDrones) do
+        if droneModel:FindFirstChild("Drone") then
+            local drone = droneModel.Drone
+            if drone:FindFirstChild("DroneESP") then drone.DroneESP:Destroy() end
+            if drone:FindFirstChild("ESPHighlight") then drone.ESPHighlight:Destroy() end
+        end
+    end
+end
+
+-- UI
+local Window = Rayfield:CreateWindow({
+    Name = "MTC",
+    LoadingTitle = "Loading...",
+    ConfigurationSaving = {Enabled = true}
+})
+
+-- Combat Tab
+local CombatTab = Window:CreateTab("Main", 7733962458)
+CombatTab:CreateSection("Settings")
+
+CombatTab:CreateToggle({
+    Name = "Enable Aim Bot",
+    CurrentValue = false,
+    Callback = function(Value)
+        AimBot.Enabled = Value
+        AimBot.Activated = false
+        AimBot.TargetLocked = false
+        FOVCircle.Visible = Value and AimBot.ShowFOV
+    end
+})
+
+CombatTab:CreateToggle({
+    Name = "Show FOV Circle",
+    CurrentValue = true,
+    Callback = function(Value)
+        AimBot.ShowFOV = Value
+        FOVCircle.Visible = Value and AimBot.Enabled
+    end
+})
+
+CombatTab:CreateToggle({
+    Name = "Aim at Head",
+    CurrentValue = true,
+    Callback = function(Value)
+        AimBot.TargetPart = Value and "Head" or "HumanoidRootPart"
+    end
+})
+
+CombatTab:CreateToggle({
+    Name = "Ignore Team",
+    CurrentValue = true,
+    Callback = function(Value)
+        AimBot.TeamCheck = Value
+    end
+})
+
+CombatTab:CreateSlider({
+    Name = "FOV Size",
+    Range = {10, 500},
+    Increment = 10,
+    Suffix = "px",
+    CurrentValue = 100,
+    Callback = function(Value)
+        AimBot.FOV = Value
+        FOVCircle.Size = UDim2.new(0, Value, 0, Value)
+    end
+})
+
+CombatTab:CreateSlider({
+    Name = "Smoothness",
+    Range = {1, 50},
+    Increment = 1,
+    Suffix = "x",
+    CurrentValue = 30,
+    Callback = function(Value)
+        AimBot.Smoothness = Value
+    end
+})
+
+-- Object Tab
+local ObjectTab = Window:CreateTab("Object", 13014546637)
+
+ObjectTab:CreateSection("Crate Control")
+
+ObjectTab:CreateButton({
+    Name = "Get AmmoCrate",
+    Callback = function()
+        local success, err = pcall(function()
+            if not LocalPlayer.Character then
+                error("Character not found")
+            end
+            
+            local hrp = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if not hrp then
+                error("HumanoidRootPart missing")
+            end
+
+            local targetCrate
+            for _, obj in ipairs(workspace:GetDescendants()) do
+                if obj.Name == "AmmoCrate" then
+                    targetCrate = obj
+                    break
+                end
+            end
+
+            if not targetCrate then
+                error("AmmoCrate not found in workspace")
+            end
+
+            local newPosition = hrp.CFrame * CFrame.new(0, 0, -3)
+            if targetCrate:IsA("Model") and targetCrate.PrimaryPart then
+                targetCrate:PivotTo(newPosition)
+            else
+                targetCrate.CFrame = newPosition
+            end
+
+            Rayfield:Notify({
+                Title = "SUCCESS",
+                Content = "Crate teleported to your position",
+                Duration = 3,
+                Image = 4483362458
+            })
+        end)
+
+        if not success then
+            Rayfield:Notify({
+                Title = "ERROR",
+                Content = err:gsub("^.*: ", ""),
+                Duration = 5,
+                Image = 4483362458
+            })
+        end
+    end
+})
+
+ObjectTab:CreateSection("Shield Settings")
+
+local ShieldSettings = {
+    NoCollide = false
+}
+
+local connection
+local function updateCollisionState()
+    local protectors = workspace.Map:FindFirstChild("SpawnProtectors")
+    
+    if not protectors or not protectors:IsA("Model") then
+        Rayfield:Notify({
+            Title = "ERROR",
+            Content = "SpawnProtectors Model not found!",
+            Duration = 3,
+            Image = 4483362458
+        })
+        return
+    end
+    
+    for _, obj in ipairs(protectors:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            obj.CanCollide = not ShieldSettings.NoCollide
+            obj.CanQuery = not ShieldSettings.NoCollide
+            obj.CanTouch = not ShieldSettings.NoCollide
+        end
+    end
+end
+
+ObjectTab:CreateToggle({
+    Name = "No shield collide",
+    CurrentValue = false,
+    Callback = function(Value)
+        ShieldSettings.NoCollide = Value
+        
+        if connection then
+            connection:Disconnect()
+            connection = nil
+        end
+
+        updateCollisionState()
+        
+        if Value then
+            local protectors = workspace.Map:FindFirstChild("SpawnProtectors")
+            if protectors then
+                connection = protectors.DescendantAdded:Connect(function(desc)
+                    if desc:IsA("BasePart") then
+                        desc.CanCollide = false
+                        desc.CanQuery = false
+                        desc.CanTouch = false
+                    end
+                end)
+            end
+        end
+        
+        Rayfield:Notify({
+            Title = "STATUS",
+            Content = Value and "Collisions disabled" or "Collisions enabled",
+            Duration = 2,
+            Image = 4483362458
+        })
+    end
+})
+
+ObjectTab:CreateSection("Fast Placement")
+ObjectTab:CreateToggle({
+    Name = "Fast place",
+    CurrentValue = false,
+    Callback = function(Value)
+        FastPlace.Enabled = Value
+        if Value then
+            if FastPlace.Connection then
+                FastPlace.Connection:Disconnect()
+            end
+            FastPlace.Connection = setupFastPlace()
+            Rayfield:Notify({
+                Title = "Fast Place",
+                Content = "Enabled smart placement",
+                Duration = 2,
+                Image = 4483362458
+            })
+        else
+            if FastPlace.Connection then
+                FastPlace.Connection:Disconnect()
+                FastPlace.Connection = nil
+            end
+            Rayfield:Notify({
+                Title = "Fast Place",
+                Content = "Disabled smart placement",
+                Duration = 2,
+                Image = 4483362458
+            })
+        end
+    end
+})
+
+-- Render Tab
+local RenderTab = Window:CreateTab("Render", 13014546637)
+RenderTab:CreateSection("Meters Settings")
+
+RenderTab:CreateToggle({
+    Name = "Metrs",
+    CurrentValue = false,
+    Callback = function(Value)
+        if Value then
+            enableMeters()
+        else
+            disableMeters()
+        end
+    end
+})
+
+RenderTab:CreateSection("Drones")
+RenderTab:CreateToggle({
+    Name = "Drone ESP",
+    CurrentValue = false,
+    Callback = function(Value)
+        DroneESP.Enabled = Value
+        if Value then
+            EnableDroneESP()
+        else
+            DisableDroneESP()
+        end
+    end
+})
+
+RenderTab:CreateToggle({
+    Name = "Drone Alert",
+    CurrentValue = false,
+    Callback = function(Value)
+        DroneESP.AlertEnabled = Value
+        if Value then
+            DroneESP.AlertedDrones = {}
+        end
+    end
+})
+
+RenderTab:CreateSlider({
+    Name = "Drone Distance",
+    Range = {10, 2500},
+    Increment = 10,
+    Suffix = "studs",
+    CurrentValue = 1000,
+    Callback = function(Value)
+        DroneESP.AlertDistance = Value
+    end
+})
+
+-- Weapons Tab
+local WeaponsTab = Window:CreateTab("Weapons", 13014546637)
+WeaponsTab:CreateSection("Weapon Modificator")
+
+WeaponsTab:CreateButton({
+    Name = "Apply Modifications",
+    Callback = function()
+        applyWeaponModifications()
+        Rayfield:Notify({
+            Title = "SUCCESS",
+            Content = "Weapon modifications applied!",
+            Duration = 2,
+            Image = 4483362458
+        })
+    end
+})
+
+WeaponsTab:CreateToggle({
+    Name = "Cycle Apply Modifications",
+    CurrentValue = false,
+    Callback = function(Value)
+        WeaponMods.CycleApply = Value
+        while WeaponMods.CycleApply do
+            applyWeaponModifications()
+            task.wait(1)
+        end
+    end
+})
+
+WeaponsTab:CreateToggle({
+    Name = "Change Fire Modes",
+    CurrentValue = false,
+    Callback = function(Value)
+        WeaponMods.ChangeFireMode = Value
+    end
+})
+
+WeaponsTab:CreateToggle({
+    Name = "No Recoil",
+    CurrentValue = false,
+    Callback = function(Value)
+        WeaponMods.NoRecoil = Value
+    end
+})
+
+
+WeaponsTab:CreateToggle({
+    Name = "Inf Ammo",
+    CurrentValue = false,
+    Callback = function(Value)
+        WeaponMods.InfAmmo = Value
+    end
+})
+
+WeaponsTab:CreateToggle({
+    Name = "Fire Rate",
+    CurrentValue = false,
+    Callback = function(Value)
+        WeaponMods.FastFire = Value
+    end
+})
+
+WeaponsTab:CreateInput({
+    Name = "Bullets",
+    PlaceholderText = "50",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(Text)
+        WeaponMods.Bullets = tonumber(Text) or 50
+    end
+})
+
+WeaponsTab:CreateSlider({
+    Name = "Spread",
+    Range = {0, 500},
+    Increment = 1,
+    Suffix = "units",
+    CurrentValue = 0,
+    Callback = function(Value)
+        WeaponMods.MaxSpread = Value
+    end
+})
+
+local VehicleTab = Window:CreateTab("Vehicles", 7733962458)
+VehicleTab:CreateSection("Switch seat")
+
+local isActive = true
+
+VehicleTab:CreateToggle({
+    Name = "Seat switcher",
+    CurrentValue = true,
+    Callback = function(value)
+        isActive = value
+    end
+})
+
+VehicleTab:CreateKeybind({
+    Name = "Switch seat",
+    CurrentKeybind = "F",
+    Callback = function()
+        if not isActive then return end
+        
+        local currentSeat = getCurrentSeatType()
+        if not currentSeat then return end
+        
+        local targetType = currentSeat == "Driver" and "Gunner" or "Driver"
+        switchSeat(targetType)
+    end
+})
+
+Rayfield:LoadConfiguration()
+
+Rayfield:LoadConfiguration()
